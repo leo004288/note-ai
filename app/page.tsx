@@ -1,9 +1,13 @@
 'use client';
 
-import { useChat } from '@ai-sdk/react';
 import { useState, useEffect } from 'react';
 
-// 문서 항목 타입 정의
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 interface DocItem {
   issue: string;
   solution: string;
@@ -11,58 +15,86 @@ interface DocItem {
 }
 
 export default function Home() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [mounted, setMounted] = useState(false);
 
-  // 브라우저 랜더링 타이밍 맞춤 (Hydration 에러 방지)
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
-    api: '/api/chat',
-    // onResponse 매개변수의 타입을 더 명확히 하거나 response 객체에서 직접 꺼내도록 수정
-    onResponse: async (response) => {
-      // response 객체가 정상적일 때만 헤더 확인
-      if (response && response.headers) {
-        const summaryHeader = response.headers.get('x-document-update');
-        if (summaryHeader) {
-          try {
-            const decoded = decodeURIComponent(summaryHeader);
-            const parsed = JSON.parse(decoded);
+  // 메시지 전송 처리 (순수 fetch 사용으로 SDK 함수 에러 원천 차단)
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
 
-            // 필요한 데이터가 다 있는지 확인 후 상태 업데이트
-            if (parsed.issue && parsed.solution) {
-              setDocs((prev) => [
-                ...prev,
-                {
-                  ...parsed,
-                  timestamp: new Date().toLocaleTimeString(),
-                },
-              ]);
-            }
-          } catch (e) {
-            console.error('문서 요약 파싱 에러:', e);
-          }
-        }
+    const userContent = input.trim();
+    setInput('');
+
+    // 1. 유저 메시지 추가
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: userContent,
+    };
+    
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
+    setIsLoading(true);
+
+    try {
+      // 2. 백엔드로 fetch 요청
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || '응답을 받아오지 못했습니다.');
       }
-    },
-    onError(error) {
-      console.error('채팅 중 에러 발생:', error);
-      alert('AI와 통신 중 오류가 발생했습니다. .env.local의 API 키를 확인해주세요.');
-    },
-  });
 
-  // 하이드레이션 오류 방지용 로딩 화면
+      // 3. AI 메시지 추가
+      const aiMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: data.text,
+      };
+
+      setMessages((prev) => [...prev, aiMessage]);
+
+      // 4. 우측 자동 문서 저장 메모장에 추가
+      setDocs((prev) => [
+        ...prev,
+        {
+          issue: userContent.length > 50 ? userContent.slice(0, 50) + '...' : userContent,
+          solution: data.text,
+          timestamp: new Date().toLocaleTimeString(),
+        },
+      ]);
+    } catch (error: any) {
+      console.error('전송 에러:', error);
+      alert(`오류가 발생했습니다: ${error.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   if (!mounted) return null;
 
   return (
     <div className="flex h-screen bg-gray-100 text-gray-800">
-      {/* ---------------- 좌측: AI 채팅 창 ---------------- */}
+      {/* ---------------- 좌측: AI 대화창 ---------------- */}
       <div className="w-1/2 flex flex-col border-r border-gray-300 bg-white">
         <div className="p-4 bg-slate-800 text-white font-bold text-lg flex justify-between">
           <span>💬 AI 대화창</span>
-          {isLoading && <span className="text-xs text-yellow-400 self-center">답변 생성 중...</span>}
+          {isLoading && <span className="text-xs text-yellow-400 self-center font-normal">AI 답변 생각 중...</span>}
         </div>
         
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -88,26 +120,28 @@ export default function Home() {
           ))}
         </div>
 
-        {/* 폼 제출 이벤트 핸들러 연결 확인 */}
-        <form onSubmit={handleSubmit} className="p-4 border-t border-gray-200 flex gap-2">
+        {/* 폼 및 입력창 */}
+        <form 
+          onSubmit={handleSubmit} 
+          className="p-4 border-t border-gray-200 flex gap-2 relative z-10"
+        >
           <input
             value={input}
-            onChange={handleInputChange}
+            onChange={(e) => setInput(e.target.value)}
             placeholder="질문이나 문제를 입력하세요..."
-            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <button
             type="submit"
-            // 답변 생성 중일 때는 버튼 비활성화 (스크린샷 에러 해결)
-            disabled={isLoading || !input?.trim()}
-            className="bg-blue-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 transition"
+            disabled={isLoading || !input.trim()}
+            className="bg-blue-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
           >
-            전송
+            {isLoading ? '생성 중...' : '전송'}
           </button>
         </form>
       </div>
 
-      {/* ---------------- 우측: 실시간 자동 메모장 ---------------- */}
+      {/* ---------------- 우측: 실시간 자동 저장 문서 ---------------- */}
       <div className="w-1/2 flex flex-col bg-slate-50">
         <div className="p-4 bg-slate-700 text-white font-bold text-lg flex justify-between items-center">
           <span>📝 실시간 자동 저장 문서</span>
